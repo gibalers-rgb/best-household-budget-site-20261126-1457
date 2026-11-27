@@ -1,8 +1,6 @@
-// A tiny static server for app/ (Node 22, standard library only), for
-// local development only: `node serve.ts` serves app/ on
-// http://localhost:8080 (`--port <n>` for another port). It sends the MIME
-// types a browser needs, refuses any path outside app/, and does nothing
-// else clever — this is a convenience for testing, not a production server.
+// Server statis kecil untuk pengembangan lokal: `node serve.ts` menyajikan
+// app/ di http://localhost:8080 (`--port <n>` untuk port lain). Hanya untuk
+// melihat situs di peramban saat membangun; situsnya sendiri tidak butuh ini.
 import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -24,7 +22,6 @@ const MIME = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.ico': 'image/x-icon',
 };
 
 createServer((request, response) => {
