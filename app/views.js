@@ -1,326 +1,204 @@
-// HearthBudget views — one HTML builder per page.
-//
-// Each builder returns the markup for the #app region from the live book
-// (main.js inserts it and wires the controls). No figure is typed in by
-// hand: every dollar on screen is summed from the book, so adding a
-// purchase on the Transactions page moves the Dashboard totals too.
+/* DompetKeluarga — semua tampilan (satu fungsi per halaman).
+   Setiap halaman menghitung angkanya dari state yang sama, jadi angka di
+   Beranda, Anggaran, dan Laporan selalu cocok satu sama lain. */
+import { formatRupiah, formatRupiahShort, formatDate, pct, escapeHtml } from './format.js';
 
-import { CATEGORIES, categoryById, MONTH_LABEL, MONTH_SHORT, MONTH_HISTORY, DAYS_ELAPSED } from './data.js';
-import { money } from './charts.js';
-
-export function esc(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-export function incomeTotal(book) {
-  return book.income.reduce((sum, row) => sum + row.amount, 0);
-}
-
-export function spentTotal(book) {
-  return book.purchases.reduce((sum, row) => sum + row.amount, 0);
-}
-
-export function spentPerCategory(book) {
-  const totals = new Map(CATEGORIES.map((c) => [c.id, 0]));
-  for (const row of book.purchases) {
-    totals.set(row.category, (totals.get(row.category) || 0) + row.amount);
+export function totals(state) {
+  const income = state.income.reduce((s, i) => s + i.amount, 0);
+  const spentByCat = {};
+  let spent = 0;
+  for (const t of state.transactions) {
+    if (t.cat === 'income') continue;
+    spent += t.amount;
+    spentByCat[t.cat] = (spentByCat[t.cat] || 0) + t.amount;
   }
-  return totals;
+  const budgetTotal = state.budgets.reduce((s, b) => s + b.limit, 0);
+  return { income, spent, spentByCat, budgetTotal, left: income - spent };
 }
 
-function envelopeLimit(book, category) {
-  return book.envelopes.find((row) => row.category === category)?.limit || 0;
+export function budgetOf(state, id) {
+  return state.budgets.find((b) => b.id === id);
 }
 
-function meter(pct, label) {
-  const clamped = Math.max(0, Math.min(100, pct));
-  const tone = pct > 100 ? ' over' : pct > 85 ? ' warm' : '';
-  return `<div class="meter" role="progressbar" aria-valuenow="${Math.round(clamped)}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(label)}"><span class="meter-fill${tone}" style="width:${clamped}%"></span></div>`;
+function progressBar(used, limit, color) {
+  const p = Math.min(100, pct(used, limit));
+  const over = used > limit;
+  return '<div class="bar" role="progressbar" aria-valuenow="' + p + '" aria-valuemin="0" aria-valuemax="100">' +
+    '<span style="width:' + p + '%;background:' + (over ? '#b23a2e' : color) + '"></span></div>';
 }
 
-function summaryCard(label, value, sub) {
-  return `<article class="summary"><p class="summary-label">${label}</p><p class="summary-value">${value}</p><p class="summary-sub">${sub}</p></article>`;
+function daysLeft(state) {
+  const day = Number(String(state.today || '2026-11-27').split('-')[2]);
+  return Math.max(0, (state.monthDays || 30) - day);
 }
 
-function pageHead(title, lede, pill) {
-  return `<header class="page-head"><div><h1>${title}</h1><p class="lede">${lede}</p></div>${pill ? `<p class="month-tag">${pill}</p>` : ''}</header>`;
+function budgetCard(state, b, t) {
+  const used = t.spentByCat[b.id] || 0;
+  const left = b.limit - used;
+  const over = used > b.limit;
+  const leftDays = daysLeft(state);
+  const pace = leftDays > 0 && !over ? ' · ' + formatRupiah(Math.floor(left / leftDays)) + '/hari untuk ' + leftDays + ' hari tersisa' : '';
+  return '<article class="card budget-card">' +
+    '<div class="budget-head"><span class="cat-icon" aria-hidden="true">' + b.icon + '</span>' +
+    '<div><h3>' + escapeHtml(b.name) + '</h3>' +
+    '<p class="muted">' + formatRupiah(used) + ' dari ' + formatRupiah(b.limit) + '</p></div>' +
+    '<span class="pct-badge' + (over ? ' over' : '') + '">' + pct(used, b.limit) + '%</span></div>' +
+    progressBar(used, b.limit, b.color) +
+    '<p class="budget-left">' + (over
+      ? '⚠️ Lewat ' + formatRupiah(-left) + ' dari limit — kurangi minggu depan.'
+      : 'Sisa ' + formatRupiah(left) + ' sampai akhir bulan' + pace + '.') + '</p>' +
+    '<form class="limit-form" data-action="set-limit" data-cat="' + b.id + '">' +
+    '<label>Ubah limit <input type="number" name="limit" min="0" step="1000" value="' + b.limit + '" aria-label="Limit ' + escapeHtml(b.name) + '"> </label>' +
+    '<button type="submit" class="btn small">Simpan limit</button></form>' +
+    '</article>';
 }
 
-function newestFirst(rows) {
-  return [...rows].sort((a, b) => (a.date < b.date ? 1 : -1));
-}
-
-// ---- Dashboard ------------------------------------------------------------
-
-export function dashboardView(book) {
-  const income = incomeTotal(book);
-  const spent = spentTotal(book);
-  const left = income - spent;
-  const savedPct = income > 0 ? Math.round(((income - spent) / income) * 100) : 0;
-  const perCat = spentPerCategory(book);
-  const slices = CATEGORIES
-    .map((c) => ({ label: c.label, value: perCat.get(c.id) || 0, color: c.color }))
-    .filter((slice) => slice.value > 0)
-    .sort((a, b) => b.value - a.value);
-  const unpaid = book.bills.filter((b) => !b.paid).sort((a, b) => a.dueDay - b.dueDay);
-  const unpaidSum = unpaid.reduce((sum, b) => sum + b.amount, 0);
-  const latest = newestFirst(book.purchases).slice(0, 6);
-  const tightest = book.envelopes
-    .map((row) => ({ ...row, spent: perCat.get(row.category) || 0 }))
-    .sort((a, b) => b.spent / b.limit - a.spent / a.limit)
+export function renderHome(state) {
+  const t = totals(state);
+  const recent = [...state.transactions].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6);
+  const topBudgets = [...state.budgets]
+    .map((b) => ({ b, used: t.spentByCat[b.id] || 0 }))
+    .sort((x, y) => pct(y.used, y.b.limit) - pct(x.used, x.b.limit))
     .slice(0, 4);
-
-  return `
-  ${pageHead('Good evening, Maple House', `Here is where ${MONTH_LABEL} stands — money in, money out, and what is left.`, MONTH_LABEL)}
-  <section class="summaries" aria-label="Month summary">
-    ${summaryCard('Money in', money(income), `${book.income.length} paydays this month`)}
-    ${summaryCard('Money out', money(spent), `${book.purchases.length} purchases logged`)}
-    ${summaryCard('Left to spend', money(left), `${savedPct}% of income kept so far`)}
-    ${summaryCard('Bills still due', money(unpaidSum), `${unpaid.length} of ${book.bills.length} bills unpaid`)}
-  </section>
-  <div class="columns-2">
-    <section class="panel" aria-labelledby="where-title">
-      <h2 id="where-title">Where the money went</h2>
-      <div class="donut-row">
-        <canvas id="donut" width="280" height="210" role="img" aria-label="Donut chart of spending by category"></canvas>
-        <ul class="key">${slices.map((s) => `<li><span class="swatch" style="background:${s.color}"></span>${esc(s.label)} <strong>${money(s.value)}</strong></li>`).join('')}</ul>
-      </div>
-    </section>
-    <section class="panel" aria-labelledby="tight-title">
-      <h2 id="tight-title">Envelopes closest to the edge</h2>
-      <ul class="plain-list stacked-list">${tightest.map((row) => {
-        const cat = categoryById(row.category);
-        const pct = (row.spent / row.limit) * 100;
-        return `<li><div class="line-row"><span><span class="swatch" style="background:${cat.color}"></span>${esc(cat.label)}</span><span>${money(row.spent)} of ${money(row.limit)}</span></div>${meter(pct, cat.label + ' envelope')}</li>`;
-      }).join('')}</ul>
-      <p><a class="text-link" href="#/budget">See every envelope →</a></p>
-    </section>
-  </div>
-  <div class="columns-2">
-    <section class="panel" aria-labelledby="latest-title">
-      <h2 id="latest-title">Latest spending</h2>
-      <ul class="plain-list">${latest.map((t) => {
-        const cat = categoryById(t.category);
-        return `<li><span class="row-main"><span class="swatch" style="background:${cat.color}"></span><span><strong>${esc(t.payee)}</strong><small>${esc(t.date)} · ${esc(cat.label)}</small></span></span><strong>${money(t.amount)}</strong></li>`;
-      }).join('')}</ul>
-      <p><a class="text-link" href="#/transactions">All transactions →</a></p>
-    </section>
-    <section class="panel" aria-labelledby="due-title">
-      <h2 id="due-title">Bills coming up</h2>
-      ${unpaid.length === 0
-        ? '<p class="good-news">Every bill this month is paid. Nicely done.</p>'
-        : `<ul class="plain-list">${unpaid.map((b) => `<li><span class="row-main"><span><strong>${esc(b.name)}</strong><small>Due Nov ${b.dueDay}${b.autopay ? ' · autopay' : ''}</small></span></span><strong>${money(b.amount)}</strong></li>`).join('')}</ul>`}
-      <p><a class="text-link" href="#/bills">Manage bills →</a></p>
-    </section>
-  </div>
-  <section class="panel" aria-labelledby="income-title">
-    <h2 id="income-title">Money in this month</h2>
-    <ul class="plain-list">${book.income.map((row) => `<li><span class="row-main"><span><strong>${esc(row.source)}</strong><small>${esc(row.date)}</small></span></span><strong>${money(row.amount)}</strong></li>`).join('')}</ul>
-    <p class="lede">Two salaries and the weekend market stall add up to ${money(income)} — the number every envelope is planned against.</p>
-  </section>`;
+  const goal = state.goals[0];
+  const rows = recent.map((tx) => {
+    const b = tx.cat === 'income' ? null : budgetOf(state, tx.cat);
+    return '<li class="tx-row"><span class="cat-icon" aria-hidden="true">' + (b ? b.icon : '💰') + '</span>' +
+      '<div><strong>' + escapeHtml(tx.desc) + '</strong><span class="muted">' + formatDate(tx.date) + ' · ' + (b ? escapeHtml(b.name) : 'Pemasukan') + '</span></div>' +
+      '<span class="amount ' + (tx.cat === 'income' ? 'in' : 'out') + '">' + (tx.cat === 'income' ? '+' : '−') + formatRupiah(tx.amount) + '</span></li>';
+  }).join('');
+  return '' +
+    '<section class="hero"><h1>Anggaran ' + escapeHtml(state.household) + '</h1>' +
+    '<p>' + escapeHtml(state.month) + ' · ' + state.members.join(' · ') + ' — semua angka di bawah dihitung langsung dari catatan transaksi keluarga.</p></section>' +
+    '<section class="cards-3" aria-label="Ringkasan bulan ini">' +
+    '<div class="card stat"><span class="stat-label">Pemasukan</span><strong class="in">' + formatRupiah(t.income) + '</strong><span class="muted">' + state.income.length + ' sumber</span></div>' +
+    '<div class="card stat"><span class="stat-label">Pengeluaran</span><strong class="out">' + formatRupiah(t.spent) + '</strong><span class="muted">' + pct(t.spent, t.income) + '% dari pemasukan</span></div>' +
+    '<div class="card stat"><span class="stat-label">Sisa bulan ini</span><strong>' + formatRupiah(t.left) + '</strong><span class="muted">tabungan ' + pct(t.left, t.income) + '% dari pemasukan</span></div>' +
+    '</section>' +
+    '<div class="grid-2">' +
+    '<section class="card"><h2>Belanja per kategori</h2><canvas id="donut" aria-label="Grafik donat belanja per kategori"></canvas>' +
+    '<ul class="legend">' + state.budgets.map((b) => {
+      const used = t.spentByCat[b.id] || 0;
+      return '<li><span class="dot" style="background:' + b.color + '"></span>' + escapeHtml(b.name) + ' — <strong>' + formatRupiahShort(used) + '</strong></li>';
+    }).join('') + '</ul></section>' +
+    '<section class="card"><h2>Anggaran paling ketat</h2>' +
+    topBudgets.map(({ b, used }) => '<div class="mini-budget"><div class="mini-head"><span>' + b.icon + ' ' + escapeHtml(b.name) + '</span><strong>' + pct(used, b.limit) + '%</strong></div>' + progressBar(used, b.limit, b.color) + '</div>').join('') +
+    '<p><a class="btn" href="#/anggaran">Lihat semua anggaran →</a></p></section>' +
+    '</div>' +
+    '<div class="grid-2">' +
+    '<section class="card"><h2>Transaksi terbaru</h2><ul class="tx-list">' + rows + '</ul>' +
+    '<p><a class="btn" href="#/transaksi">Semua transaksi & tambah baru →</a></p></section>' +
+    '<section class="card goal-teaser"><h2>Tujuan menabung</h2>' +
+    '<p><strong>' + escapeHtml(goal.name) + '</strong></p>' + progressBar(goal.saved, goal.target, '#2e7d5b') +
+    '<p>' + formatRupiah(goal.saved) + ' dari ' + formatRupiah(goal.target) + ' (' + pct(goal.saved, goal.target) + '%)</p>' +
+    '<p><a class="btn" href="#/tujuan">Lihat 4 tujuan keluarga →</a></p></section>' +
+    '</div>';
 }
 
-// ---- Transactions ----------------------------------------------------------
-
-export function transactionsView(book, filter) {
-  const query = (filter.query || '').toLowerCase();
-  let rows = book.purchases
-    .filter((t) => filter.category === 'all' || t.category === filter.category)
-    .filter((t) => !query || t.payee.toLowerCase().includes(query) || (t.note || '').toLowerCase().includes(query));
-  if (filter.sort === 'amount-desc') rows = [...rows].sort((a, b) => b.amount - a.amount);
-  else if (filter.sort === 'amount-asc') rows = [...rows].sort((a, b) => a.amount - b.amount);
-  else rows = newestFirst(rows);
-  const shownSum = rows.reduce((sum, t) => sum + t.amount, 0);
-
-  return `
-  ${pageHead('Transactions', 'Every dollar out the door — searchable, filterable, sortable.')}
-  <section class="panel" aria-labelledby="add-title">
-    <h2 id="add-title">Add a purchase</h2>
-    <form id="add-purchase" class="form-grid">
-      <label>Date <input type="date" name="date" value="2026-11-26" required></label>
-      <label>Paid to <input type="text" name="payee" placeholder="e.g. GreenMart Supermarket" required maxlength="80"></label>
-      <label>Category <select name="category">${CATEGORIES.map((c) => `<option value="${c.id}">${esc(c.label)}</option>`).join('')}</select></label>
-      <label>Amount ($) <input type="number" name="amount" min="0.01" step="0.01" placeholder="0.00" required></label>
-      <label class="span-all">Note <input type="text" name="note" placeholder="What was it for?" maxlength="120"></label>
-      <button class="btn" type="submit">Add transaction</button>
-    </form>
-    <p class="form-note" role="status" id="tx-note"></p>
-  </section>
-  <section class="panel" aria-labelledby="list-title">
-    <h2 id="list-title">November spending — ${rows.length} of ${book.purchases.length} shown · ${money(shownSum)}</h2>
-    <div class="filters">
-      <label>Category <select id="filter-cat">${['all', ...CATEGORIES.map((c) => c.id)].map((id) => `<option value="${id}"${filter.category === id ? ' selected' : ''}>${id === 'all' ? 'All categories' : esc(categoryById(id).label)}</option>`).join('')}</select></label>
-      <label>Search <input type="search" id="filter-q" value="${esc(filter.query || '')}" placeholder="Payee or note"></label>
-      <label>Sort <select id="filter-sort">
-        <option value="date-desc"${filter.sort === 'date-desc' ? ' selected' : ''}>Newest first</option>
-        <option value="amount-desc"${filter.sort === 'amount-desc' ? ' selected' : ''}>Largest first</option>
-        <option value="amount-asc"${filter.sort === 'amount-asc' ? ' selected' : ''}>Smallest first</option>
-      </select></label>
-    </div>
-    ${rows.length === 0
-      ? '<p class="empty">Nothing matches that filter. Try clearing the search.</p>'
-      : `<div class="table-scroll"><table>
-        <thead><tr><th scope="col">Date</th><th scope="col">Paid to</th><th scope="col">Category</th><th scope="col">Note</th><th scope="col" class="num">Amount</th><th scope="col"><span class="visually-hidden">Remove</span></th></tr></thead>
-        <tbody>${rows.map((t) => {
-          const cat = categoryById(t.category);
-          return `<tr><td>${esc(t.date)}</td><td><strong>${esc(t.payee)}</strong></td><td><span class="swatch" style="background:${cat.color}"></span>${esc(cat.label)}</td><td>${esc(t.note || '—')}</td><td class="num">${money(t.amount)}</td><td><button class="btn-small" data-delete-purchase="${esc(t.id)}" aria-label="Delete ${esc(t.payee)} ${money(t.amount)}">Delete</button></td></tr>`;
-        }).join('')}</tbody></table></div>`}
-  </section>`;
+export function renderBudgets(state) {
+  const t = totals(state);
+  return '<section class="hero"><h1>Anggaran Bulanan</h1>' +
+    '<p>Total limit ' + formatRupiah(t.budgetTotal) + ' dari pemasukan ' + formatRupiah(t.income) + '. Ubah limit apa pun di bawah — laporan ikut berubah karena semua insight membaca limit yang sedang aktif.</p></section>' +
+    '<section class="cards-3"><div class="card stat"><span class="stat-label">Total limit</span><strong>' + formatRupiah(t.budgetTotal) + '</strong></div>' +
+    '<div class="card stat"><span class="stat-label">Sudah terpakai</span><strong class="out">' + formatRupiah(t.spent) + '</strong></div>' +
+    '<div class="card stat"><span class="stat-label">Sisa anggaran</span><strong>' + formatRupiah(t.budgetTotal - t.spent) + '</strong></div></section>' +
+    '<section class="budget-grid">' + state.budgets.map((b) => budgetCard(state, b, t)).join('') + '</section>' +
+    '<p class="hint">Tips: anggaran yang sudah lewat 80% diberi tanda — pindahkan sisa dari kategori yang masih longgar sebelum akhir bulan.</p>';
 }
 
-// ---- Budget -----------------------------------------------------------------
-
-export function budgetView(book) {
-  const perCat = spentPerCategory(book);
-  const planned = book.envelopes.reduce((sum, row) => sum + row.limit, 0);
-  const spent = spentTotal(book);
-  return `
-  ${pageHead('Monthly budget', 'One envelope per category. Change a limit and it saves straight away.')}
-  <section class="summaries" aria-label="Budget totals">
-    ${summaryCard('Planned spending', money(planned), 'All envelopes together')}
-    ${summaryCard('Spent so far', money(spent), `${Math.round((spent / planned) * 100)}% of the plan used`)}
-    ${summaryCard('Still in the envelopes', money(Math.max(0, planned - spent)), 'Across all categories')}
-  </section>
-  <section class="panel" aria-labelledby="env-title">
-    <h2 id="env-title">Envelopes for ${MONTH_LABEL}</h2>
-    <ul class="envelopes">${book.envelopes.map((row) => {
-      const cat = categoryById(row.category);
-      const spentHere = perCat.get(row.category) || 0;
-      const pct = (spentHere / row.limit) * 100;
-      const remaining = row.limit - spentHere;
-      return `<li class="envelope">
-        <div class="env-top"><span><span class="swatch" style="background:${cat.color}"></span><strong>${esc(cat.label)}</strong></span>
-        <label>Monthly limit $ <input type="number" min="0" step="1" value="${row.limit}" data-envelope-limit="${esc(row.category)}" aria-label="Monthly limit for ${esc(cat.label)}"></label></div>
-        ${meter(pct, cat.label + ' envelope')}
-        <p class="env-numbers"><span>${money(spentHere)} spent</span><span class="${remaining < 0 ? 'over-text' : ''}">${remaining < 0 ? money(-remaining) + ' over' : money(remaining) + ' left'}</span><span>${Math.round(pct)}%</span></p>
-      </li>`;
-    }).join('')}</ul>
-    <p class="form-note" role="status" id="budget-note">Tip: groceries is the envelope most households overspend first — check it before the weekend shop.</p>
-  </section>`;
+export function renderTransactions(state, filter) {
+  const t = totals(state);
+  const cats = [{ id: 'all', name: 'Semua' }, { id: 'income', name: 'Pemasukan' }, ...state.budgets];
+  const list = [...state.transactions]
+    .filter((tx) => filter === 'all' || tx.cat === filter)
+    .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
+  const rows = list.map((tx) => {
+    const b = tx.cat === 'income' ? null : budgetOf(state, tx.cat);
+    return '<li class="tx-row"><span class="cat-icon" aria-hidden="true">' + (b ? b.icon : '💰') + '</span>' +
+      '<div><strong>' + escapeHtml(tx.desc) + '</strong><span class="muted">' + formatDate(tx.date) + ' · ' + (b ? escapeHtml(b.name) : 'Pemasukan') + '</span></div>' +
+      '<span class="amount ' + (tx.cat === 'income' ? 'in' : 'out') + '">' + (tx.cat === 'income' ? '+' : '−') + formatRupiah(tx.amount) + '</span>' +
+      '<button class="btn small danger" data-action="delete-tx" data-id="' + tx.id + '">Hapus</button></li>';
+  }).join('');
+  const options = state.budgets.map((b) => '<option value="' + b.id + '">' + escapeHtml(b.name) + '</option>').join('');
+  return '<section class="hero"><h1>Transaksi</h1>' +
+    '<p>' + state.transactions.length + ' transaksi di ' + escapeHtml(state.month) + ' — pemasukan ' + formatRupiah(t.income) + ', pengeluaran ' + formatRupiah(t.spent) + '.</p></section>' +
+    '<section class="card"><h2>Tambah transaksi baru</h2>' +
+    '<form class="add-form" data-action="add-tx">' +
+    '<label>Tanggal <input type="date" name="date" value="2026-11-27" required></label>' +
+    '<label>Keterangan <input type="text" name="desc" placeholder="cth: Belanja mingguan" maxlength="80" required></label>' +
+    '<label>Kategori <select name="cat"><option value="income">Pemasukan</option>' + options + '</select></label>' +
+    '<label>Jumlah (Rp) <input type="number" name="amount" min="1000" step="1000" placeholder="150000" required></label>' +
+    '<button type="submit" class="btn primary">+ Tambah</button></form>' +
+    '<p class="hint">Transaksi baru langsung mengubah ringkasan, anggaran, dan laporan — tersimpan di perangkat ini.</p></section>' +
+    '<section class="card"><h2>Daftar transaksi</h2>' +
+    '<div class="filters" role="group" aria-label="Saring kategori">' +
+    cats.map((c) => '<button class="chip' + (filter === c.id ? ' active' : '') + '" data-action="filter" data-cat="' + c.id + '">' + escapeHtml(c.name) + '</button>').join('') +
+    '</div><ul class="tx-list">' + (rows || '<li class="muted">Belum ada transaksi untuk saringan ini.</li>') + '</ul>' +
+    '<p><button class="btn small" data-action="reset">⟲ Kembalikan data contoh</button></p></section>';
 }
 
-// ---- Goals ------------------------------------------------------------------
-
-export function goalsView(book) {
-  const savedSum = book.goals.reduce((sum, g) => sum + g.saved, 0);
-  const targetSum = book.goals.reduce((sum, g) => sum + g.target, 0);
-  return `
-  ${pageHead('Savings goals', 'Money with a job: each goal is a jar you fill a little at a time.')}
-  <section class="summaries" aria-label="Goals totals">
-    ${summaryCard('Saved toward goals', money(savedSum), `${book.goals.length} goals in progress`)}
-    ${summaryCard('Total target', money(targetSum), `${Math.round((savedSum / targetSum) * 100)}% of the way there`)}
-    ${summaryCard('Still to save', money(targetSum - savedSum), 'Across every goal')}
-  </section>
-  <section class="goals-grid" aria-label="Goals">
-    ${book.goals.map((g) => {
-      const pct = (g.saved / g.target) * 100;
-      return `<article class="panel goal">
-        <h2>${esc(g.name)}</h2>
-        <p class="lede">${esc(g.note)}</p>
-        <p class="goal-figures"><strong>${money(g.saved)}</strong> of ${money(g.target)}</p>
-        ${meter(pct, g.name + ' progress')}
-        <p class="goal-pct">${Math.round(pct)}% funded · ${money(g.target - g.saved)} to go</p>
-        <form class="contribute" data-goal="${esc(g.id)}">
-          <label>Add to this goal $ <input type="number" name="amount" min="1" step="1" placeholder="50" required></label>
-          <button class="btn" type="submit">Add money</button>
-        </form>
-      </article>`;
-    }).join('')}
-  </section>
-  <section class="panel" aria-labelledby="new-goal-title">
-    <h2 id="new-goal-title">Start a new goal</h2>
-    <form id="add-goal" class="form-grid">
-      <label>Goal name <input type="text" name="name" placeholder="e.g. New washing machine" required maxlength="60"></label>
-      <label>Target ($) <input type="number" name="target" min="1" step="1" placeholder="500" required></label>
-      <label>Already saved ($) <input type="number" name="saved" min="0" step="1" value="0"></label>
-      <label>Why it matters <input type="text" name="note" placeholder="A short note" maxlength="120"></label>
-      <button class="btn" type="submit">Create goal</button>
-    </form>
-    <p class="form-note" role="status" id="goal-note"></p>
-  </section>`;
+export function renderReports(state) {
+  const t = totals(state);
+  const byCat = state.budgets.map((b) => ({ label: b.name, value: t.spentByCat[b.id] || 0, color: b.color }));
+  const biggest = [...byCat].sort((a, b) => b.value - a.value)[0];
+  const saving = t.left;
+  const savingRate = pct(saving, t.income);
+  // Insight makan di luar: limit dibaca LANGSUNG dari state.budgets yang sedang aktif,
+  // jadi kalau pengguna mengubah limit di halaman Anggaran, angka di sini ikut berubah.
+  const dining = budgetOf(state, 'makan');
+  const diningUsed = t.spentByCat.makan || 0;
+  const diningLimit = dining ? dining.limit : 0;
+  const diningPct = pct(diningUsed, diningLimit);
+  const diningLeft = diningLimit - diningUsed;
+  const dailyFood = Math.round(diningUsed / 27);
+  const leftDays = daysLeft(state);
+  const dailyBudget = leftDays > 0 ? Math.round((t.budgetTotal - t.spent) / leftDays) : t.budgetTotal - t.spent;
+  const insights = [
+    { title: '🍜 Makan di luar: ' + formatRupiah(diningUsed) + ' dari limit ' + formatRupiah(diningLimit) + ' (' + diningPct + '%)',
+      body: diningLeft >= 0
+        ? 'Masih sisa ' + formatRupiah(diningLeft) + ' sampai akhir bulan — rata-rata ' + formatRupiah(dailyFood) + ' per hari sejauh ini. Kalau pola ini berlanjut, keluarga ini menutup bulan di bawah limit makan di luar.'
+        : 'Sudah lewat ' + formatRupiah(-diningLeft) + ' dari limit. Kurangi 2x makan di luar minggu depan, atau pindahkan sisa dari kategori Hiburan yang masih longgar.' },
+    { title: '🏆 Pengeluaran terbesar: ' + biggest.label + ' — ' + formatRupiah(biggest.value),
+      body: 'Kategori ini menyerap ' + pct(biggest.value, t.spent) + '% dari semua pengeluaran. Cek struk mingguannya: belanja harian yang direncanakan per minggu biasanya memangkas 10–15% dibanding belanja tanpa daftar.' },
+    { title: '💰 Tabungan bulan ini: ' + formatRupiah(saving) + ' (' + savingRate + '% pemasukan)',
+      body: savingRate >= 20
+        ? 'Di atas patokan sehat 20%. Masukkan ' + formatRupiah(Math.round(saving * 0.6)) + ' ke Dana Darurat dan sisanya ke Liburan Akhir Tahun.'
+        : 'Di bawah patokan sehat 20%. Targetkan menekan satu kategori paling longgar — biasanya Makan di Luar atau Hiburan — sebesar ' + formatRupiah(Math.round(t.income * 0.2) - saving) + ' untuk mencapai 20%.' },
+    { title: '📅 ' + leftDays + ' hari tersisa di bulan ini',
+      body: 'Sisa anggaran ' + formatRupiah(t.budgetTotal - t.spent) + ' untuk ' + leftDays + ' hari — sekitar ' + formatRupiah(dailyBudget) + ' per hari. Cukup untuk belanja harian terakhir tanpa menyentuh tabungan.' },
+  ];
+  return '<section class="hero"><h1>Laporan ' + escapeHtml(state.month) + '</h1>' +
+    '<p>Ringkasan akhir bulan untuk ' + escapeHtml(state.household) + ': pemasukan ' + formatRupiah(t.income) + ', pengeluaran ' + formatRupiah(t.spent) + ', sisa ' + formatRupiah(t.left) + '.</p></section>' +
+    '<section class="cards-3"><div class="card stat"><span class="stat-label">Pemasukan</span><strong class="in">' + formatRupiah(t.income) + '</strong><span class="muted">3 sumber</span></div>' +
+    '<div class="card stat"><span class="stat-label">Pengeluaran</span><strong class="out">' + formatRupiah(t.spent) + '</strong><span class="muted">' + state.transactions.filter((x) => x.cat !== 'income').length + ' transaksi</span></div>' +
+    '<div class="card stat"><span class="stat-label">Tingkat tabungan</span><strong>' + savingRate + '%</strong><span class="muted">' + formatRupiah(saving) + ' tersisa</span></div></section>' +
+    '<section class="card"><h2>Pengeluaran per kategori</h2><canvas id="bars" aria-label="Grafik batang pengeluaran per kategori"></canvas></section>' +
+    '<section><h2>Yang bisa dilakukan minggu ini</h2><div class="insights">' +
+    insights.map((s) => '<article class="card insight"><h3>' + escapeHtml(s.title) + '</h3><p>' + escapeHtml(s.body) + '</p></article>').join('') +
+    '</div></section>' +
+    '<section class="card"><h2>Per kategori</h2><table class="report-table"><thead><tr><th>Kategori</th><th>Limit</th><th>Terpakai</th><th>Sisa</th><th>%</th></tr></thead><tbody>' +
+    state.budgets.map((b) => {
+      const used = t.spentByCat[b.id] || 0;
+      return '<tr><td>' + b.icon + ' ' + escapeHtml(b.name) + '</td><td>' + formatRupiah(b.limit) + '</td><td>' + formatRupiah(used) + '</td><td>' + formatRupiah(b.limit - used) + '</td><td>' + pct(used, b.limit) + '%</td></tr>';
+    }).join('') +
+    '</tbody></table></section>';
 }
 
-// ---- Bills -------------------------------------------------------------------
-
-export function billsView(book) {
-  const unpaid = book.bills.filter((b) => !b.paid);
-  const dueSum = unpaid.reduce((sum, b) => sum + b.amount, 0);
-  const paidSum = book.bills.filter((b) => b.paid).reduce((sum, b) => sum + b.amount, 0);
-  return `
-  ${pageHead('Bills', `Recurring bills for ${MONTH_LABEL}. Mark one paid and it stays paid.`)}
-  <section class="summaries" aria-label="Bills totals">
-    ${summaryCard('Still to pay', money(dueSum), `${unpaid.length} bills left this month`)}
-    ${summaryCard('Already paid', money(paidSum), `${book.bills.length - unpaid.length} of ${book.bills.length} bills`)}
-    ${summaryCard('Monthly total', money(dueSum + paidSum), 'All recurring bills')}
-  </section>
-  <section class="panel" aria-labelledby="bill-list-title">
-    <h2 id="bill-list-title">November bills</h2>
-    <ul class="bill-list">${[...book.bills].sort((a, b) => a.dueDay - b.dueDay).map((b) => `
-      <li class="${b.paid ? 'paid' : ''}">
-        <span class="row-main"><span><strong>${esc(b.name)}</strong><small>Due Nov ${b.dueDay}${b.autopay ? ' · autopay' : ' · pay manually'}</small></span></span>
-        <span class="bill-right"><strong>${money(b.amount)}</strong>
-        <button class="btn-small" data-toggle-bill="${esc(b.id)}">${b.paid ? '✓ Paid — undo' : 'Mark paid'}</button></span>
-      </li>`).join('')}</ul>
-  </section>
-  <section class="panel" aria-labelledby="new-bill-title">
-    <h2 id="new-bill-title">Add a recurring bill</h2>
-    <form id="add-bill" class="form-grid">
-      <label>Bill name <input type="text" name="name" placeholder="e.g. Mobile — two lines" required maxlength="60"></label>
-      <label>Amount ($) <input type="number" name="amount" min="0.01" step="0.01" placeholder="0.00" required></label>
-      <label>Due day of month <input type="number" name="dueDay" min="1" max="31" value="1" required></label>
-      <label class="check"><input type="checkbox" name="autopay"> Autopay on</label>
-      <button class="btn" type="submit">Add bill</button>
-    </form>
-    <p class="form-note" role="status" id="bill-note"></p>
-  </section>`;
-}
-
-// ---- Reports -----------------------------------------------------------------
-
-export function reportsView(book) {
-  const income = incomeTotal(book);
-  const spent = spentTotal(book);
-  const perCat = spentPerCategory(book);
-  const ranked = CATEGORIES
-    .map((c) => ({ label: c.label, value: perCat.get(c.id) || 0, color: c.color }))
-    .sort((a, b) => b.value - a.value);
-  const biggest = [...book.purchases].sort((a, b) => b.amount - a.amount)[0];
-  const history = MONTH_HISTORY.map((h) => (h.month === MONTH_SHORT ? { ...h, spent } : h));
-  const savedPct = income > 0 ? Math.round(((income - spent) / income) * 100) : 0;
-  const pastFive = history.slice(0, 5);
-  const avgSpent = Math.round(pastFive.reduce((sum, h) => sum + h.spent, 0) / pastFive.length);
-  const diningSpent = perCat.get('dining') || 0;
-  const diningLimit = envelopeLimit(book, 'dining');
-  const grocerySpent = perCat.get('groceries') || 0;
-  const groceryWeekly = Math.round(grocerySpent / (DAYS_ELAPSED / 7));
-  const groceryLimit = envelopeLimit(book, 'groceries');
-  const weeksLeft = groceryWeekly > 0 ? Math.max(0, Math.floor((groceryLimit - grocerySpent) / groceryWeekly)) : 0;
-  return `
-  ${pageHead('Reports', 'Six months of income against spending, and what the numbers are saying.')}
-  <section class="panel" aria-labelledby="trend-title">
-    <h2 id="trend-title">Income vs spending — last 6 months</h2>
-    <canvas id="bars" width="760" height="300" role="img" aria-label="Bar chart of monthly income and spending, June to November"></canvas>
-    <p class="legend-inline"><span class="swatch" style="background:#2f6f5e"></span> Income <span class="swatch" style="background:#c25e7e"></span> Spending</p>
-  </section>
-  <div class="columns-2">
-    <section class="panel" aria-labelledby="cat-title">
-      <h2 id="cat-title">November by category</h2>
-      <ul class="plain-list">${ranked.filter((t) => t.value > 0).map((t) => `<li><span class="row-main"><span class="swatch" style="background:${t.color}"></span>${esc(t.label)}</span><strong>${money(t.value)} · ${Math.round((t.value / spent) * 100)}%</strong></li>`).join('')}</ul>
-    </section>
-    <section class="panel" aria-labelledby="insight-title">
-      <h2 id="insight-title">What the numbers say</h2>
-      <ul class="insights">
-        <li><strong>${esc(ranked[0].label)}</strong> is the biggest envelope at ${money(ranked[0].value)} — ${Math.round((ranked[0].value / spent) * 100)}% of all spending.</li>
-        <li>You are keeping <strong>${savedPct}%</strong> of November income (${money(income - spent)} saved). The five-month average spend is ${money(avgSpent)} a month.</li>
-        <li>Biggest single purchase: <strong>${esc(biggest.payee)}</strong>, ${money(biggest.amount)} on ${esc(biggest.date)}.</li>
-        <li>Dining out is ${money(diningSpent)} so far — ${diningSpent <= diningLimit ? `inside its ${money(diningLimit)} envelope, with room for one more family dinner` : `${money(diningSpent - diningLimit)} over its ${money(diningLimit)} envelope`}.</li>
-        <li>Groceries run about ${money(groceryWeekly)} a week at the current pace; the ${money(groceryLimit)} envelope covers ${weeksLeft} more weekly shops.</li>
-      </ul>
-    </section>
-  </div>`;
+export function renderGoals(state) {
+  return '<section class="hero"><h1>Tujuan Menabung</h1>' +
+    '<p>Empat tujuan keluarga — setiap rupiah sisa bulan ini punya tempatnya. Tambah tabungan ke tujuan mana pun; progresnya langsung berubah.</p></section>' +
+    '<section class="goal-grid">' + state.goals.map((g) => '<article class="card goal-card">' +
+      '<div class="goal-head"><span class="cat-icon big" aria-hidden="true">' + g.icon + '</span><div><h3>' + escapeHtml(g.name) + '</h3>' +
+      '<p class="muted">' + formatRupiah(g.saved) + ' dari ' + formatRupiah(g.target) + '</p></div>' +
+      '<span class="pct-badge">' + pct(g.saved, g.target) + '%</span></div>' +
+      progressBar(g.saved, g.target, '#2e7d5b') +
+      '<p class="budget-left">Kurang ' + formatRupiah(Math.max(0, g.target - g.saved)) + ' lagi.</p>' +
+      '<form class="limit-form" data-action="add-saving" data-id="' + g.id + '">' +
+      '<label>Tambah tabungan <input type="number" name="amount" min="1000" step="1000" placeholder="100000" aria-label="Tambah tabungan ' + escapeHtml(g.name) + '"> </label>' +
+      '<button type="submit" class="btn small">+ Simpan</button></form></article>').join('') + '</section>' +
+    '<section class="card"><h2>Cara keluarga ini menabung</h2><ol class="tips">' +
+    '<li><strong>Bayar diri sendiri dulu:</strong> begitu gajian masuk, pindahkan 20% ke Dana Darurat sebelum belanja apa pun.</li>' +
+    '<li><strong>Satu tujuan, satu amplop:</strong> uang liburan tidak dicampur dengan uang sekolah — kalau satu habis, yang lain tetap aman.</li>' +
+    '<li><strong>Rayakan tonggak kecil:</strong> setiap tujuan melewati 25%, 50%, dan 75%, keluarga ini makan malam bersama dari anggaran Hiburan.</li>' +
+    '</ol></section>';
 }
