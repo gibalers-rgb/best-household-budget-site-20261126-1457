@@ -3,15 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="HearthBudget — a household budget site: track spending, set envelopes, save toward goals, stay on top of bills.">
-<title>Dashboard — HearthBudget</title>
+<meta name="description" content="HearthBudget — a household budget planner: see where the month's money goes, keep envelopes in check, save for goals and never miss a bill.">
+<title>HearthBudget — Household budget planner</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="site-header">
-  <div class="wrap">
-    <a class="brand" href="#/">Hearth<span>Budget</span></a>
-    <nav id="site-nav" aria-label="Sections">
+<a class="skip-link" href="#app">Skip to the page</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="logo" href="#/">Hearth<span>Budget</span></a>
+    <nav class="topnav" aria-label="Main sections">
       <a href="#/">Dashboard</a>
       <a href="#/transactions">Transactions</a>
       <a href="#/budget">Budget</a>
@@ -22,8 +23,9 @@
   </div>
 </header>
 <main id="app" tabindex="-1" aria-live="polite"></main>
-<footer class="site-footer">
-  <p>HearthBudget — a household budget planner. Your data stays in this browser; nothing is sent anywhere.</p>
+<noscript><p class="noscript-note">HearthBudget needs JavaScript turned on — the budget book is drawn by the page itself.</p></noscript>
+<footer class="page-footer">
+  <p>HearthBudget — the Maple House budget book. Everything is stored in this browser only; nothing leaves your device.</p>
   <button id="reset-demo" type="button">Reset demo data</button>
 </footer>
 <script type="module" src="main.js"></script>
